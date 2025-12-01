@@ -1,0 +1,99 @@
+Pose Estimation Comparison - lun 1 dic 2025, 21:38:11, CET
+Video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+----------------------------------------
+Python: 3.9.19 (main, Aug 14 2024, 05:11:09) 
+[Clang 18.1.8 ]
+MediaPipe: 0.10.21
+Initializing MediaPipe PoseLandmarker (Tasks API) with GPU delegate...
+Processing video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total frames: 9000
+Video FPS: 30.0
+Saving output to results/mediapipe/output.mp4
+
+Finished processing.
+Total Time: 117.29s
+Average FPS: 76.74
+
+==============================
+PERFORMANCE SUMMARY
+==============================
+Method: MediaPipe (GPU Delegate)
+Video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total Frames: 9000
+Processing Time: 117.29 seconds
+Processing Speed: 76.74 FPS
+==============================
+
+
+Python: 3.10.12 (main, Nov  4 2025, 08:48:33) [GCC 11.4.0]
+Initializing YOLO11n-pose...
+Processing video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total frames: 9000
+Video FPS: 30.0
+Saving output to results/yolo/output.mp4
+
+Finished processing.
+Total Time: 126.74s
+Average FPS: 71.01
+
+==============================
+PERFORMANCE SUMMARY
+==============================
+Method: YOLO11n-pose (Ultralytics)
+Video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total Frames: 9000
+Processing Time: 126.74 seconds
+Processing Speed: 71.01 FPS
+==============================
+
+
+Python: 3.10.12 (main, Nov  4 2025, 08:48:33) [GCC 11.4.0]
+MMPose: using MMPoseInferencer
+Initializing MMPose RTMO-l (using local config and checkpoint)...
+Loads checkpoint by local backend from path: model_weights/rtmo-l_16xb16-600e_coco-640x640-516a421f_20231211.pth
+12/01 21:42:19 - mmengine - WARNING - Failed to search registry with scope "mmpose" in the "function" registry tree. As a workaround, the current "function" registry in "mmengine" is used to build instance. This may cause unexpected failure when running the built modules. Please check whether "mmpose" is a correct scope, or whether the registry is initialized.
+Processing video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total frames: 9000
+Video FPS: 30.0
+Saving output to results/mmpose/output.mp4
+
+Finished processing.
+Total Time: 195.47s
+Average FPS: 46.04
+
+==============================
+PERFORMANCE SUMMARY
+==============================
+Method: MMPose RTMO-l
+Video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total Frames: 9000
+Processing Time: 195.47 seconds
+Processing Speed: 46.04 FPS
+==============================
+
+
+Python: 3.10.12 (main, Nov  4 2025, 08:48:33) [GCC 11.4.0]
+TensorFlow Version: 2.18.1
+Loading MoveNet MultiPose from: https://tfhub.dev/google/movenet/multipose/lightning/1
+Model cache dir: /home/carlos/pose_estimators/model_weights
+Model loaded.
+Processing video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total frames: 9000
+Video FPS: 30.0
+Saving output to results/movenet/output.mp4
+
+Finished processing.
+Total Time: 131.47s
+Average FPS: 68.46
+
+==============================
+PERFORMANCE SUMMARY
+==============================
+Method: MoveNet MultiPose Lightning (TensorFlow)
+Video: /home/carlos/pose_estimators/data/14-10-BO-0001_short.mp4
+Total Frames: 9000
+Processing Time: 131.47 seconds
+Processing Speed: 68.46 FPS
+==============================
+
+
