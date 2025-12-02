@@ -85,8 +85,9 @@ fi
 echo "Installing MMPose dependencies..."
 source .mmpose/bin/activate
 # Install specific PyTorch version compatible with pre-built MMCV wheels
-uv pip install "torch==2.1.0" "torchvision==0.16.0" --index-url https://download.pytorch.org/whl/cu121 --python .mmpose/bin/python --active
-uv pip install opencv-python tqdm openmim --python .mmpose/bin/python --active
+uv pip install "torch==2.1.0" "torchvision==0.16.0" --index-url https://download.pytorch.org/whl/cu121 --python .mmpose/bin/python 
+uv pip install opencv-python tqdm openmim setuptools tomli platformdirs packaging--python .mmpose/bin/python
+pip install "numpy<2.0"
 
 # MMLab deps via mim
 # Use the mim executable installed in the venv
@@ -136,7 +137,7 @@ fi
 
 echo "Installing MoveNet dependencies..."
 source .movenet/bin/activate
-uv pip install tensorflow tensorflow-hub opencv-python tqdm --python .movenet/bin/python --active
+uv pip install tensorflow tensorflow-hub opencv-python tqdm --python .movenet/bin/python
 deactivate
 
 echo ""

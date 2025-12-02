@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Configuration
-VIDEO_PATH="$(pwd)/data/14-10-BO-0001_short.mp4"
+VIDEO_PATH="$(pwd)/data/14-10-BO-0001_short_30s.mp4"
 LOG_FILE="comparison_results.txt"
-RESULTS_DIR="results"
+RESULTS_DIR="results_short_30s"
 
 # Create results directory if it doesn't exist
 mkdir -p "$RESULTS_DIR"
