@@ -26,6 +26,7 @@ if len(sys.argv) > 2:
 # Using a larger size (e.g. 352, 384, 512) helps with detecting small people in wide shots
 INPUT_SIZE = 384 
 MODEL_URL = "https://tfhub.dev/google/movenet/multipose/lightning/1"
+MAX_PEOPLE = 2 # Limit to the top 2 most confident predictions
 
 def draw_keypoints(frame, keypoints_list, confidence_threshold=0.1):
     """
@@ -50,7 +51,8 @@ def draw_keypoints(frame, keypoints_list, confidence_threshold=0.1):
     }
     
     # Iterate over each person
-    for person_kps in keypoints_list:
+    # keypoints_list is sorted by confidence score, so taking the top MAX_PEOPLE works for filtering
+    for person_kps in keypoints_list[:MAX_PEOPLE]:
         # person_kps is [17, 3] -> (y, x, score)
         
         scaled_kps = []
@@ -122,6 +124,7 @@ def main():
 
     print(f"Loading MoveNet MultiPose from: {MODEL_URL}")
     print(f"Model cache dir: {os.environ.get('TFHUB_CACHE_DIR')}")
+    print(f"Max people to draw: {MAX_PEOPLE}")
     model = hub.load(MODEL_URL)
     movenet = model.signatures['serving_default']
     print("Model loaded.")

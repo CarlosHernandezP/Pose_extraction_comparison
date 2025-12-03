@@ -73,13 +73,14 @@ def main():
     
     try:
         # Create options with GPU delegate and Multi-pose support
+        # Lowering thresholds to improve detection of multiple people or smaller figures
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path_local, delegate=BaseOptions.Delegate.GPU),
             running_mode=running_mode,
             num_poses=5, # Detect up to 5 people
-            min_pose_detection_confidence=0.5,
-            min_pose_presence_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_pose_detection_confidence=0.3, # Lowered from 0.5
+            min_pose_presence_confidence=0.3,  # Lowered from 0.5
+            min_tracking_confidence=0.3        # Lowered from 0.5
         )
         
         # Initialize Landmarker
@@ -121,6 +122,7 @@ def main():
                 print(f"Processing video: {VIDEO_PATH}")
                 print(f"Total frames: {total_frames}")
                 print(f"Video FPS: {fps_video}")
+                print(f"Confidence Thresholds: Detection=0.3, Presence=0.3, Tracking=0.3")
 
                 out = None
                 if SAVE_OUTPUT:

@@ -6,11 +6,11 @@ import sys
 import os
 
 # Video path
-VIDEO_PATH = 'data/14-10-BO-0001_short.mp4'
+VIDEO_PATH = 'data/14-10-BO-0001_short_30s.mp4'
 if len(sys.argv) > 1:
     VIDEO_PATH = sys.argv[1]
-SAVE_OUTPUT = False
-OUTPUT_PATH = 'output_yolopose.mp4'
+SAVE_OUTPUT = True
+OUTPUT_PATH = 'output_yolopose_conf_0.1.mp4'
 if len(sys.argv) > 2:
     OUTPUT_PATH = sys.argv[2]
     SAVE_OUTPUT = True
@@ -88,7 +88,7 @@ def main():
     # Process video
     # stream=True is efficient for processing long videos
     # device=0 uses GPU 0, device='cpu' uses CPU
-    results_generator = model(VIDEO_PATH, stream=True, verbose=False)
+    results_generator = model(VIDEO_PATH, stream=True, imgsz=1280, verbose=False, conf=0.1)
     
     for result in results_generator:
         # If we wanted to visualize:
