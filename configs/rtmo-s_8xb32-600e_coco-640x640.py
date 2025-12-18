@@ -319,7 +319,7 @@ model = dict(
     test_cfg=dict(input_size=(
         1088,
         1088,
-    ), nms_thr=0.65, score_thr=0.1),
+    ), nms_thr=0.80, score_thr=0.05),
     type='BottomupPoseEstimator')
 optim_wrapper = dict(
     clip_grad=dict(max_norm=0.1, norm_type=2),

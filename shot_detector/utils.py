@@ -88,6 +88,14 @@ def get_foot_position(bbox):
     x1, y1, x2, y2 = bbox
     return (int((x1 + x2) / 2), y2)
 
+def unwrap_bbox(bbox):
+    """
+    Helper to unwrap nested bbox structure ([x1,y1,x2,y2],) -> [x1,y1,x2,y2]
+    """
+    if len(bbox) == 1 and isinstance(bbox[0], (list, tuple, np.ndarray)):
+        return bbox[0]
+    return bbox
+
 # --- Stubs for missing functions required by extract_shots.py ---
 
 def parse_shot_csv(csv_path):
@@ -97,51 +105,154 @@ def parse_shot_csv(csv_path):
     """
     try:
         df = pd.read_csv(csv_path)
+        
         # Ensure required columns exist
         required = ['Shot', 'FrameId', 'Player']
         if not all(col in df.columns for col in required):
             print(f"CSV {csv_path} missing required columns.")
             return pd.DataFrame()
+        
+        # Coerce FrameId to numeric, handling errors
+        df['FrameId'] = pd.to_numeric(df['FrameId'], errors='coerce')
+        # Drop rows where FrameId is NaN
+        df = df.dropna(subset=['FrameId'])
+        
         return df
     except Exception as e:
         print(f"Error reading CSV {csv_path}: {e}")
         return pd.DataFrame()
 
-def get_video_path(csv_path, videos_dir):
+def get_video_path(csv_path, videos_dirs):
     """
     Infers video path from csv path or content.
-    This is a guess implementation.
+    Handles 'annotation_' prefix and suffix like '_1'.
+    Searches in a list of video directories.
     """
-    # Assuming csv filename matches video filename
-    base_name = os.path.splitext(os.path.basename(csv_path))[0]
-    # Try different extensions
-    for ext in ['.mp4', '.mov', '.avi']:
-        vid_path = os.path.join(videos_dir, base_name + ext)
-        if os.path.exists(vid_path):
-            return vid_path
+    filename = os.path.basename(csv_path)
+    # Remove extension
+    base = os.path.splitext(filename)[0]
     
-    # Fallback: maybe just return constructed path and let caller handle check
-    return os.path.join(videos_dir, base_name + ".mp4")
+    # Remove prefix "annotation_"
+    if base.startswith("annotation_"):
+        base = base[len("annotation_"):]
+        
+    # Remove suffix like "_1", "_2"
+    if '_' in base:
+        parts = base.rsplit('_', 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            base = parts[0]
+            
+    # Now try to find the video in all directories
+    if isinstance(videos_dirs, str):
+        videos_dirs = [videos_dirs]
+        
+    for d in videos_dirs:
+        if not os.path.exists(d): continue
+        for ext in ['.mp4', '.mov', '.avi']:
+            vid_path = os.path.join(d, base + ext)
+            if os.path.exists(vid_path):
+                return vid_path
+            
+    # Fallback to first dir + base + .mp4 even if not found
+    return os.path.join(videos_dirs[0], base + ".mp4")
 
-def identify_player(poses, player_label):
+def identify_player(poses, player_label, K, D, H):
     """
-    Identifies which pose index corresponds to the player_label.
-    This is a tricky one without knowing the logic (e.g. is 'Player' 'Top', 'Bottom', 'Left', 'Right'?).
+    Identifies which pose index corresponds to the player_label based on spatial position.
     
-    Placeholder: Returns the index of the first pose.
+    Args:
+        poses: List of pose dicts (result from mmpose)
+        player_label: 'left', 'right', 'top', 'bottom', 'top_left', etc.
+        K, D, H: Calibration matrices
+        
+    Returns:
+        index of the best matching pose, or -1 if none found.
     """
     if not poses:
         return -1
-    # TODO: Implement actual identification logic based on player_label
-    # For now, return 0 if exists
-    return 0
+    
+    best_idx = -1
+    best_score = float('-inf')
+    
+    # Pre-calculate transformed positions for all candidates
+    positions = []
+    for i, pose in enumerate(poses):
+        bbox = unwrap_bbox(pose['bbox'])
+        if len(bbox) < 4:
+            positions.append(None)
+            continue
+            
+        foot_pos = get_foot_position(bbox)
+        # Transform to court coordinates
+        if H is not None:
+            transformed = transform_points([foot_pos], K, D, H)
+            if len(transformed) > 0:
+                positions.append(transformed[0])
+            else:
+                positions.append(None)
+        else:
+            # Fallback if no calibration: use pixel coordinates
+            # This logic will be reversed/different for pixels vs meters, 
+            # but usually left/right is consistent. Top/Bottom depends on Y-axis direction.
+            positions.append(foot_pos)
+
+    # Normalize label
+    label = player_label.lower().strip()
+    
+    scores_list = []  # For debugging
+    
+    for i, pos in enumerate(positions):
+        if pos is None: continue
+        
+        x, y = pos
+        score = 0
+        
+        # Simple heuristics based on label
+        # Assuming transformed coordinates (0-10, 0-20)
+        # origin (0,0) usually one corner. 
+        # Assuming X is width (0-10), Y is length (0-20).
+        
+        if 'left' in label:
+            # Prefer smaller X (or larger depending on view?)
+            # Usually left side of court has smaller X or larger X depending on calibration
+            # Let's assume Left side is X < 5
+            score -= x # Smaller X = Higher Score
+        elif 'right' in label:
+            score += x # Larger X = Higher Score
+            
+        if 'top' in label:
+            # Prefer Larger Y (far side) or Smaller Y?
+            # Let's assume Top is Y > 10 (far side)
+            score += y
+        elif 'bottom' in label:
+             score -= y
+             
+        # Combine if like 'top_left'
+        
+        scores_list.append((i, score, x, y))
+        
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    
+    # Debug output
+    if len(scores_list) > 1:
+        print(f"  identify_player('{player_label}'): Scores: {[(i, f'{s:.2f}', f'({x:.1f},{y:.1f})') for i, s, x, y in scores_list]}")
+        print(f"  -> Selected index {best_idx} with score {best_score:.2f}")
+    
+    return best_idx
 
 def get_idle_player(poses, active_idx):
     """
     Returns the index of the player that is NOT the active_idx.
+    Selects the first available index that isn't active_idx.
     """
     if not poses or len(poses) < 2:
         return -1
+    
+    # If active_idx is -1, just return the first one? Or -1?
+    if active_idx == -1:
+        return 0 # Fallback
     
     for i in range(len(poses)):
         if i != active_idx:
