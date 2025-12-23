@@ -30,6 +30,36 @@ FISHEYE_FILE = 'fishcam-fisheye.txt'
 # Debug mode: Set to True to see all detected poses with indices
 DEBUG_MODE = True
 
+# COCO Keypoint mapping for normalization
+# 0: nose, 1: left_eye, 2: right_eye, 3: left_ear, 4: right_ear
+# 5: left_shoulder, 6: right_shoulder, 7: left_elbow, 8: right_elbow
+# 9: left_wrist, 10: right_wrist, 11: left_hip, 12: right_hip
+# 13: left_knee, 14: right_knee, 15: left_ankle, 16: right_ankle
+
+COCO_TO_FEATURE_IDX = {
+    5: 0,   # left_shoulder
+    6: 1,   # right_shoulder
+    7: 2,   # left_elbow
+    8: 3,   # right_elbow
+    9: 4,   # left_wrist
+    10: 5,  # right_wrist
+    11: 6,  # left_hip
+    12: 7,  # right_hip
+    13: 8,  # left_knee
+    14: 9,  # right_knee
+    15: 10, # left_ankle
+    16: 11  # right_ankle
+}
+
+BODY_KEYPOINT_NAMES = [
+    'left_shoulder', 'right_shoulder',
+    'left_elbow', 'right_elbow',
+    'left_wrist', 'right_wrist',
+    'left_hip', 'right_hip',
+    'left_knee', 'right_knee',
+    'left_ankle', 'right_ankle'
+]
+
 # Tracking thresholds
 DISTANCE_THRESHOLD = 150 * 150  # 150px squared (pixel space)
 COURT_DISTANCE_THRESHOLD = 2.0 * 2.0  # 2 meters in court space
@@ -829,29 +859,163 @@ def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info
 
     return img
 
-def save_pose_csv(poses_sequence, output_path):
+def normalize_keypoints_body_relative(keypoints, image_width, image_height):
     """
-    Saves the pose sequence to a CSV.
-    Format: frame_idx, kpt1_x, kpt1_y, kpt1_score, ...
+    Normalize keypoints using body-relative normalization.
+    Returns 27 features: 24 body-relative + 3 absolute position features.
+    
+    keypoints: Array of shape (12, 2) containing x, y coordinates for the 12 body parts
+    """
+    # Extract body keypoints (12 keypoints)
+    body_keypoints = keypoints
+    
+    # Calculate hip center (average of left and right hip)
+    left_hip = body_keypoints[6]  # left_hip index in feature order
+    right_hip = body_keypoints[7]  # right_hip index in feature order
+    
+    # Check if hips are valid (not NaN)
+    if np.any(np.isnan(left_hip)) or np.any(np.isnan(right_hip)):
+        hip_center = np.array([0.0, 0.0])
+    else:
+        hip_center = (left_hip + right_hip) / 2.0
+    
+    # Calculate shoulder width (distance between left and right shoulder)
+    left_shoulder = body_keypoints[0]  # left_shoulder index
+    right_shoulder = body_keypoints[1]  # right_shoulder index
+    
+    # Check if shoulders are valid
+    if np.any(np.isnan(left_shoulder)) or np.any(np.isnan(right_shoulder)):
+        shoulder_width = 1.0
+    else:
+        shoulder_width = np.linalg.norm(right_shoulder - left_shoulder)
+        if shoulder_width < 1.0:
+            shoulder_width = 1.0
+    
+    # Normalize body keypoints relative to hip center and shoulder width
+    body_relative = (body_keypoints - hip_center) / shoulder_width  # (12, 2)
+    body_relative_flat = body_relative.flatten()  # (24,)
+    
+    # Calculate absolute position features (normalized by image size)
+    if np.any(np.isnan(left_shoulder)) or np.any(np.isnan(right_shoulder)):
+        shoulder_center = np.array([0.0, 0.0])
+    else:
+        shoulder_center = (left_shoulder + right_shoulder) / 2.0
+    
+    # Normalize absolute positions by image size
+    hip_y_abs = hip_center[1] / image_height if not np.isnan(hip_center[1]) else 0.0
+    hip_x_abs = hip_center[0] / image_width if not np.isnan(hip_center[0]) else 0.0
+    shoulder_center_y_abs = shoulder_center[1] / image_height if not np.isnan(shoulder_center[1]) else 0.0
+    
+    # Combine: 24 body-relative features + 3 absolute features = 27 features
+    features = np.concatenate([
+        body_relative_flat,  # (24,)
+        np.array([hip_y_abs, hip_x_abs, shoulder_center_y_abs])  # (3,)
+    ])
+    
+    return features
+
+def save_pose_csv(poses_sequence, output_path, image_width=None, image_height=None):
+    """
+    Saves the pose sequence to a CSV with normalized features.
+    Format: frame_num, left_shoulder_x_body_rel, left_shoulder_y_body_rel, ..., hip_y_abs, hip_x_abs, shoulder_center_y_abs
+    
+    If image_width/height are not provided, falls back to raw keypoint format.
     """
     data = []
-    for frame_idx, pose in enumerate(poses_sequence):
-        row = {'frame_idx': frame_idx}
-        if pose:
-            kpts = pose['keypoints'] # usually list of [x, y] or [x, y, score]
-            # keypoint_scores might be separate
-            kp_scores = pose.get('keypoint_scores', [1.0]*len(kpts))
-            
-            for i, (kp, score) in enumerate(zip(kpts, kp_scores)):
-                row[f'kpt{i}_x'] = kp[0]
-                row[f'kpt{i}_y'] = kp[1]
-                row[f'kpt{i}_score'] = score
-        else:
-            # Handle missing pose? Fill 0?
-            pass
-        data.append(row)
+    
+    # If no image dimensions, use old format (for backward compatibility)
+    if image_width is None or image_height is None:
+        for frame_idx, pose in enumerate(poses_sequence):
+            row = {'frame_num': frame_idx}
+            if pose:
+                kpts = pose['keypoints'] # usually list of [x, y] or [x, y, score]
+                # keypoint_scores might be separate
+                kp_scores = pose.get('keypoint_scores', [1.0]*len(kpts))
+                
+                for i, (kp, score) in enumerate(zip(kpts, kp_scores)):
+                    row[f'kpt{i}_x'] = kp[0]
+                    row[f'kpt{i}_y'] = kp[1]
+                    row[f'kpt{i}_score'] = score
+            else:
+                # Handle missing pose? Fill 0?
+                pass
+            data.append(row)
+    else:
+        # Normalized format
+        for frame_idx, pose in enumerate(poses_sequence):
+            row = {'frame_num': frame_idx}
+            if pose and 'keypoints' in pose:
+                try:
+                    kpts = np.array(pose['keypoints'])  # COCO format: 17 keypoints
+                    
+                    # Handle different keypoint formats: [17, 2] or [17, 3] or list of [x,y] or [x,y,score]
+                    if len(kpts.shape) == 1:
+                        # Flattened array, reshape if possible
+                        if len(kpts) >= 34:  # At least 17 keypoints * 2
+                            kpts = kpts.reshape(-1, 2)[:17]
+                        else:
+                            raise ValueError(f"Unexpected keypoint format: shape {kpts.shape}")
+                    elif len(kpts.shape) == 2:
+                        # Already in [17, 2] or [17, 3] format
+                        if kpts.shape[0] < 17:
+                            # Pad with zeros if we have fewer than 17 keypoints
+                            padded = np.zeros((17, 2))
+                            padded[:kpts.shape[0], :2] = kpts[:, :2]
+                            kpts = padded
+                    else:
+                        raise ValueError(f"Unexpected keypoint format: shape {kpts.shape}")
+                    
+                    # Extract 12 body keypoints in the correct order
+                    body_kpts_12 = np.zeros((12, 2))
+                    for coco_idx, feat_idx in COCO_TO_FEATURE_IDX.items():
+                        if coco_idx < len(kpts):
+                            kp = kpts[coco_idx]
+                            if len(kp) >= 2:
+                                body_kpts_12[feat_idx] = kp[:2]  # Take x,y
+                    
+                    # Normalize
+                    features = normalize_keypoints_body_relative(body_kpts_12, image_width, image_height)
+                    
+                    # Add normalized features to row
+                    for i, kp_name in enumerate(BODY_KEYPOINT_NAMES):
+                        row[f'{kp_name}_x_body_rel'] = features[i * 2]
+                        row[f'{kp_name}_y_body_rel'] = features[i * 2 + 1]
+                    row['hip_y_abs'] = features[24]
+                    row['hip_x_abs'] = features[25]
+                    row['shoulder_center_y_abs'] = features[26]
+                except Exception as e:
+                    # If normalization fails, fill with NaN
+                    print(f"Warning: Failed to normalize pose at frame {frame_idx}: {e}")
+                    for kp_name in BODY_KEYPOINT_NAMES:
+                        row[f'{kp_name}_x_body_rel'] = np.nan
+                        row[f'{kp_name}_y_body_rel'] = np.nan
+                    row['hip_y_abs'] = np.nan
+                    row['hip_x_abs'] = np.nan
+                    row['shoulder_center_y_abs'] = np.nan
+            else:
+                # Missing pose - fill with NaN
+                for kp_name in BODY_KEYPOINT_NAMES:
+                    row[f'{kp_name}_x_body_rel'] = np.nan
+                    row[f'{kp_name}_y_body_rel'] = np.nan
+                row['hip_y_abs'] = np.nan
+                row['hip_x_abs'] = np.nan
+                row['shoulder_center_y_abs'] = np.nan
+            data.append(row)
         
     df = pd.DataFrame(data)
+    
+    # Ensure column order matches shot_predictor.py expectations
+    if image_width is not None and image_height is not None:
+        column_order = ['frame_num']
+        for kp_name in BODY_KEYPOINT_NAMES:
+            column_order.extend([f'{kp_name}_x_body_rel', f'{kp_name}_y_body_rel'])
+        column_order.extend(['hip_y_abs', 'hip_x_abs', 'shoulder_center_y_abs'])
+        
+        # Reorder columns if they exist
+        existing_cols = [col for col in column_order if col in df.columns]
+        if existing_cols:
+            df = df[existing_cols]
+    
     df.to_csv(output_path, index=False)
 
 def main():
@@ -1086,9 +1250,12 @@ def main():
                 tracked_idle_indices[i] = idle_match_idx
 
             # Generate output with forward-fill for missing frames (max 5 consecutive)
-            pose_data_sequence = []
+            pose_data_sequence = []  # Active player
+            idle_pose_data_sequence = []  # Idle player
             last_valid_pose = None
+            last_valid_idle_pose = None
             consecutive_lost_frames = 0
+            consecutive_lost_idle_frames = 0
             MAX_FORWARD_FILL = 5
             
             # Create output video
@@ -1130,7 +1297,7 @@ def main():
                 if out is not None:
                     out.write(vis_frame)
                 
-                # Collect pose data with forward-fill (max 5 consecutive frames)
+                # Collect active pose data with forward-fill (max 5 consecutive frames)
                 if act_idx != -1 and act_idx < len(poses):
                     last_valid_pose = poses[act_idx]
                     pose_data_sequence.append(poses[act_idx])
@@ -1143,13 +1310,49 @@ def main():
                     else:
                         pose_data_sequence.append(None)  # Lost for too long or never had valid pose
                         consecutive_lost_frames += 1
+                
+                # Collect idle pose data with forward-fill (max 5 consecutive frames)
+                if idl_idx != -1 and idl_idx < len(poses):
+                    last_valid_idle_pose = poses[idl_idx]
+                    idle_pose_data_sequence.append(poses[idl_idx])
+                    consecutive_lost_idle_frames = 0  # Reset counter
+                else:
+                    # Use previous frame's pose if available and within limit
+                    if last_valid_idle_pose is not None and consecutive_lost_idle_frames < MAX_FORWARD_FILL:
+                        idle_pose_data_sequence.append(last_valid_idle_pose)
+                        consecutive_lost_idle_frames += 1
+                    else:
+                        idle_pose_data_sequence.append(None)  # Lost for too long or never had valid pose
+                        consecutive_lost_idle_frames += 1
             
             if out is not None:
                 out.release()
             
-            # Save CSV
+            # Save CSV with normalized features
+            # Get image dimensions from first frame (or from video if available)
+            if frames and len(frames) > 0:
+                img_height, img_width = frames[0].shape[:2]
+            else:
+                # Fallback: try to get from video if we have the path
+                # This shouldn't happen if extraction succeeded, but handle gracefully
+                img_height, img_width = None, None
+                if video_path and os.path.exists(video_path):
+                    cap = cv2.VideoCapture(video_path)
+                    if cap.isOpened():
+                        img_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                        img_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                        cap.release()
+            
+            # Save active player pose CSV
             pose_csv_filename = f"{video_name}_{center_frame}_{shot_type}_{player_label}_pose.csv"
-            save_pose_csv(pose_data_sequence, os.path.join(OUTPUT_DIR, pose_csv_filename))
+            save_pose_csv(pose_data_sequence, os.path.join(OUTPUT_DIR, pose_csv_filename), 
+                         image_width=img_width, image_height=img_height)
+            
+            # Save idle player pose CSV (if we have idle data)
+            if any(p is not None for p in idle_pose_data_sequence):
+                idle_pose_csv_filename = f"{video_name}_{center_frame}_idle_{player_label}_pose.csv"
+                save_pose_csv(idle_pose_data_sequence, os.path.join(OUTPUT_DIR, idle_pose_csv_filename), 
+                             image_width=img_width, image_height=img_height)
 
 if __name__ == "__main__":
     main()
