@@ -46,3 +46,7 @@ echo "  unset LD_LIBRARY_PATH && .venv/bin/python -m shot_detector.extract_shots
 echo "========================================"
 
 
+
+
+
+

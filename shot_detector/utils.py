@@ -45,6 +45,7 @@ def load_fisheye_params(path):
 def load_perspective_matrix(path):
     """
     Load perspective transformation matrix from a file.
+    Returns float32 matrix for OpenCV compatibility.
     """
     if not os.path.exists(path):
         print(f"Warning: Perspective matrix file not found: {path}")
@@ -53,7 +54,10 @@ def load_perspective_matrix(path):
     try:
         matrix = np.loadtxt(path)
         if matrix.shape != (3, 3):
+            print(f"Error: Perspective matrix shape is {matrix.shape}, expected (3, 3)")
             return None
+        # Ensure float32 for OpenCV compatibility
+        matrix = matrix.astype(np.float32)
         return matrix
     except Exception as e:
         print(f"Error loading perspective matrix: {e}")
@@ -159,11 +163,12 @@ def get_video_path(csv_path, videos_dirs):
 def identify_player(poses, player_label, K, D, H):
     """
     Identifies which pose index corresponds to the player_label based on spatial position.
+    Uses pixel/image coordinates (not court coordinates).
     
     Args:
         poses: List of pose dicts (result from mmpose)
         player_label: 'left', 'right', 'top', 'bottom', 'top_left', etc.
-        K, D, H: Calibration matrices
+        K, D, H: Calibration matrices (not used for position matching, but kept for API compatibility)
         
     Returns:
         index of the best matching pose, or -1 if none found.
@@ -174,7 +179,7 @@ def identify_player(poses, player_label, K, D, H):
     best_idx = -1
     best_score = float('-inf')
     
-    # Pre-calculate transformed positions for all candidates
+    # Pre-calculate pixel positions for all candidates
     positions = []
     for i, pose in enumerate(poses):
         bbox = unwrap_bbox(pose['bbox'])
@@ -183,18 +188,8 @@ def identify_player(poses, player_label, K, D, H):
             continue
             
         foot_pos = get_foot_position(bbox)
-        # Transform to court coordinates
-        if H is not None:
-            transformed = transform_points([foot_pos], K, D, H)
-            if len(transformed) > 0:
-                positions.append(transformed[0])
-            else:
-                positions.append(None)
-        else:
-            # Fallback if no calibration: use pixel coordinates
-            # This logic will be reversed/different for pixels vs meters, 
-            # but usually left/right is consistent. Top/Bottom depends on Y-axis direction.
-            positions.append(foot_pos)
+        # Use pixel coordinates directly (not transformed to court space)
+        positions.append(foot_pos)
 
     # Normalize label
     label = player_label.lower().strip()
@@ -208,24 +203,23 @@ def identify_player(poses, player_label, K, D, H):
         score = 0
         
         # Simple heuristics based on label
-        # Assuming transformed coordinates (0-10, 0-20)
-        # origin (0,0) usually one corner. 
-        # Assuming X is width (0-10), Y is length (0-20).
+        # Using pixel/image coordinates:
+        # - X: 0 is left edge, larger X is right edge
+        # - Y: 0 is top edge, larger Y is bottom edge
         
         if 'left' in label:
-            # Prefer smaller X (or larger depending on view?)
-            # Usually left side of court has smaller X or larger X depending on calibration
-            # Let's assume Left side is X < 5
+            # Prefer smaller X (left side of image)
             score -= x # Smaller X = Higher Score
         elif 'right' in label:
+            # Prefer larger X (right side of image)
             score += x # Larger X = Higher Score
             
         if 'top' in label:
-            # Prefer Larger Y (far side) or Smaller Y?
-            # Let's assume Top is Y > 10 (far side)
-            score += y
+            # Prefer smaller Y (top of image, Y=0 is at top)
+            score -= y # Smaller Y = Higher Score
         elif 'bottom' in label:
-             score -= y
+            # Prefer larger Y (bottom of image)
+            score += y # Larger Y = Higher Score
              
         # Combine if like 'top_left'
         

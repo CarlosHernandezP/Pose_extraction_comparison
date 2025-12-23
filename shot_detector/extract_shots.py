@@ -152,20 +152,280 @@ def get_calibration(video_name):
 
     return K, D, H
 
-def is_pose_valid(pose, K, D, H, img_height=None):
+def is_pose_near_bottom(bbox, img_height, bottom_margin=0.05):
+    """
+    Checks if a pose is near the bottom of the image.
+    
+    Args:
+        bbox: Bounding box [x1, y1, x2, y2]
+        img_height: Image height
+        bottom_margin: Margin from bottom as fraction of image height (default 5%)
+    
+    Returns:
+        True if pose is near bottom, False otherwise
+    """
+    if len(bbox) < 4:
+        return False
+    
+    foot_pos = get_foot_position(bbox)
+    foot_y = foot_pos[1]
+    
+    # Check if near bottom (within bottom_margin of bottom edge)
+    return foot_y > img_height * (1 - bottom_margin)
+
+def is_pose_near_corners_or_bottom(bbox, img_width, img_height, corner_margin=0.05, bottom_margin=0.05):
+    """
+    Checks if a pose is near the corners or bottom of the image.
+    These are often false positives from reflections or static objects.
+    
+    Args:
+        bbox: Bounding box [x1, y1, x2, y2]
+        img_width: Image width
+        img_height: Image height
+        corner_margin: Margin as fraction of image size (default 5%)
+        bottom_margin: Margin from bottom as fraction of image height (default 5%)
+    
+    Returns:
+        True if pose is near corners or bottom, False otherwise
+    """
+    if len(bbox) < 4:
+        return False
+    
+    x1, y1, x2, y2 = bbox[:4]
+    foot_pos = get_foot_position(bbox)
+    foot_x, foot_y = foot_pos
+    
+    # Check if near bottom (within bottom_margin of bottom edge)
+    if foot_y > img_height * (1 - bottom_margin):
+        return True
+    
+    # Check if near corners
+    corner_threshold_x = img_width * corner_margin
+    corner_threshold_y = img_height * corner_margin
+    
+    # Bottom-left corner
+    if foot_x < corner_threshold_x and foot_y > img_height * (1 - corner_margin):
+        return True
+    
+    # Bottom-right corner
+    if foot_x > img_width * (1 - corner_margin) and foot_y > img_height * (1 - corner_margin):
+        return True
+    
+    # Top-left corner (less common but possible)
+    if foot_x < corner_threshold_x and foot_y < corner_threshold_y:
+        return True
+    
+    # Top-right corner
+    if foot_x > img_width * (1 - corner_margin) and foot_y < corner_threshold_y:
+        return True
+    
+    return False
+
+def filter_stationary_poses(poses_per_frame, movement_threshold=20.0, min_frames=5, 
+                           img_height=None, bottom_margin=0.05, filter_bottom_stationary_only=False):
+    """
+    Filters poses that barely move across frames (likely false positives).
+    If filter_bottom_stationary_only is True, only filters poses that are BOTH near bottom AND stationary.
+    
+    Args:
+        poses_per_frame: List of lists, where each inner list contains poses for a frame
+        movement_threshold: Minimum pixel movement required (default 20 pixels)
+        min_frames: Minimum number of frames the pose must appear in to be considered stationary (default 5)
+        img_height: Image height (required if filter_bottom_stationary_only is True)
+        bottom_margin: Margin from bottom as fraction of image height (default 5%)
+        filter_bottom_stationary_only: If True, only filter poses that are near bottom AND stationary
+    
+    Returns:
+        List of lists with stationary poses removed
+    """
+    if not poses_per_frame or len(poses_per_frame) < min_frames:
+        return poses_per_frame
+    
+    # Build a list of all poses with their frame indices and positions
+    pose_tracks = []  # List of (frame_idx, foot_pos, pose, is_near_bottom)
+    
+    for frame_idx, frame_poses in enumerate(poses_per_frame):
+        for pose in frame_poses:
+            bbox = unwrap_bbox(pose['bbox'])
+            if len(bbox) < 4:
+                continue
+            foot_pos = get_foot_position(bbox)
+            # Check if near bottom (if filtering bottom+stationary only)
+            is_near_bottom = False
+            if filter_bottom_stationary_only and img_height is not None:
+                is_near_bottom = is_pose_near_bottom(bbox, img_height, bottom_margin)
+            pose_tracks.append((frame_idx, foot_pos, pose, is_near_bottom))
+    
+    # Group poses into tracks by proximity
+    # Simple approach: poses in nearby frames with similar positions are the same track
+    tracks = []  # List of lists of (frame_idx, foot_pos, pose, is_near_bottom)
+    match_distance = 100  # Pixels
+    
+    for frame_idx, foot_pos, pose, is_near_bottom in pose_tracks:
+        matched = False
+        for track in tracks:
+            # Check if this pose matches any pose in the track
+            for track_frame_idx, track_foot_pos, _, _ in track:
+                dist = np.sqrt((foot_pos[0] - track_foot_pos[0])**2 + 
+                              (foot_pos[1] - track_foot_pos[1])**2)
+                # Match if close in position and within reasonable frame distance
+                if dist < match_distance and abs(frame_idx - track_frame_idx) <= min_frames:
+                    track.append((frame_idx, foot_pos, pose, is_near_bottom))
+                    matched = True
+                    break
+            if matched:
+                break
+        
+        if not matched:
+            tracks.append([(frame_idx, foot_pos, pose, is_near_bottom)])
+    
+    # Filter out stationary tracks
+    filtered_poses_per_frame = [[] for _ in range(len(poses_per_frame))]
+    filtered_count = 0
+    
+    for track in tracks:
+        if len(track) < min_frames:
+            # Too few appearances, keep it (might be valid but brief)
+            for frame_idx, _, pose, _ in track:
+                filtered_poses_per_frame[frame_idx].append(pose)
+            continue
+        
+        # Calculate maximum movement in this track
+        positions = [foot_pos for _, foot_pos, _, _ in track]
+        max_movement = 0.0
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                movement = np.sqrt((positions[i][0] - positions[j][0])**2 +
+                                  (positions[i][1] - positions[j][1])**2)
+                max_movement = max(max_movement, movement)
+        
+        # Check if track is near bottom (if any pose in track is near bottom, consider it near bottom)
+        track_is_near_bottom = any(is_near_bottom for _, _, _, is_near_bottom in track)
+        
+        # Decide whether to filter:
+        # - If filter_bottom_stationary_only: only filter if BOTH stationary AND near bottom
+        # - Otherwise: filter if stationary
+        should_filter = False
+        if filter_bottom_stationary_only:
+            # Only filter if stationary AND near bottom
+            if max_movement < movement_threshold and track_is_near_bottom:
+                should_filter = True
+        else:
+            # Filter if stationary (regardless of position)
+            if max_movement < movement_threshold:
+                should_filter = True
+        
+        # Keep track if it moves enough or doesn't meet filter criteria
+        if not should_filter:
+            for frame_idx, _, pose, _ in track:
+                filtered_poses_per_frame[frame_idx].append(pose)
+        else:
+            # Track is filtered out
+            filtered_count += len(track)
+    
+    return filtered_poses_per_frame
+
+def filter_flickering_poses(poses_per_frame, min_presence_ratio=0.8):
+    """
+    Filters poses that flicker (don't appear in at least min_presence_ratio of frames).
+    
+    Args:
+        poses_per_frame: List of lists, where each inner list contains poses for a frame
+        min_presence_ratio: Minimum ratio of frames the pose must appear in (default 0.8 = 80%)
+    
+    Returns:
+        Tuple of (filtered_poses_per_frame, flickering_tracks)
+        flickering_tracks: List of track info for poses that were filtered as flickering
+    """
+    if not poses_per_frame or len(poses_per_frame) == 0:
+        return poses_per_frame, []
+    
+    total_frames = len(poses_per_frame)
+    min_frames_required = int(total_frames * min_presence_ratio)
+    
+    # Build tracks (same as in filter_stationary_poses)
+    pose_tracks = []  # List of (frame_idx, foot_pos, pose)
+    
+    for frame_idx, frame_poses in enumerate(poses_per_frame):
+        for pose in frame_poses:
+            bbox = unwrap_bbox(pose['bbox'])
+            if len(bbox) < 4:
+                continue
+            foot_pos = get_foot_position(bbox)
+            pose_tracks.append((frame_idx, foot_pos, pose))
+    
+    # Group poses into tracks by proximity
+    tracks = []
+    match_distance = 100  # Pixels
+    
+    for frame_idx, foot_pos, pose in pose_tracks:
+        matched = False
+        for track in tracks:
+            for track_frame_idx, track_foot_pos, _ in track:
+                dist = np.sqrt((foot_pos[0] - track_foot_pos[0])**2 + 
+                              (foot_pos[1] - track_foot_pos[1])**2)
+                if dist < match_distance:
+                    track.append((frame_idx, foot_pos, pose))
+                    matched = True
+                    break
+            if matched:
+                break
+        
+        if not matched:
+            tracks.append([(frame_idx, foot_pos, pose)])
+    
+    # Filter out flickering tracks
+    filtered_poses_per_frame = [[] for _ in range(len(poses_per_frame))]
+    flickering_tracks = []
+    
+    for track in tracks:
+        presence_ratio = len(track) / total_frames
+        
+        if presence_ratio >= min_presence_ratio:
+            # Keep track - appears in enough frames
+            for frame_idx, _, pose in track:
+                filtered_poses_per_frame[frame_idx].append(pose)
+        else:
+            # Flickering - mark for visualization but don't include in filtered output
+            flickering_tracks.append({
+                'frames': [f_idx for f_idx, _, _ in track],
+                'presence_ratio': presence_ratio
+            })
+    
+    return filtered_poses_per_frame, flickering_tracks
+
+def is_pose_valid(pose, K, D, H, img_height=None, img_width=None):
     """
     Checks if a pose is within the imaginary field (0-10, 0-20).
     Also filters background players (y < 30% of image height).
+    Filters poses near corners/bottom of image.
     """
     bbox = unwrap_bbox(pose['bbox'])
     if len(bbox) < 4:
         return False
-        
+    
     # 1. Pixel-based filtering (y > 30% of height)
     if img_height is not None:
         foot_y = get_foot_position(bbox)[1]
         if foot_y < 0.25 * img_height:
              return False # Too far up (background players)
+        
+        # 2. Filter poses near corners (bottom filtering is done in combination with stationary)
+        if img_width is not None:
+            # Only filter top corners, not bottom (bottom is handled with stationary filtering)
+            corner_margin = 0.05
+            corner_threshold_x = img_width * corner_margin
+            corner_threshold_y = img_height * corner_margin
+            foot_pos = get_foot_position(bbox)
+            foot_x, foot_y = foot_pos
+            
+            # Check top corners only (not bottom corners)
+            # Top-left corner
+            if foot_x < corner_threshold_x and foot_y < corner_threshold_y:
+                return False
+            # Top-right corner
+            if foot_x > img_width * (1 - corner_margin) and foot_y < corner_threshold_y:
+                return False
 
     if H is None:
         return True # No calibration, assume valid or handle differently
@@ -182,7 +442,7 @@ def is_pose_valid(pose, K, D, H, img_height=None):
     tx, ty = transformed[0]
     
     # Filter -0.3 to 10.3 x (0.3m margin), -1.3 to 21.3 y (1.3m margin)
-    if -0.3 <= tx <= 10.3 and -1.3 <= ty <= 21.3:
+    if -1.1 <= tx <= 10.7 and -0.7 <= ty <= 20.7:
         return True
         
     return False
@@ -191,9 +451,14 @@ def extract_clip_and_pose(video_path, start_frame, duration, inferencer, K=None,
     """
     Extracts frames, runs pose estimation, and returns data.
     Filters poses based on calibration if provided.
+    Also filters poses near corners/bottom and stationary poses.
     
     Args:
         return_all_poses: If True, returns all poses (filtered and unfiltered) for debugging
+    
+    Returns:
+        If return_all_poses: (frames, poses_per_frame, all_poses_per_frame, filtering_info)
+        filtering_info: Dict with 'filtered_per_frame' and 'flickering_per_frame' lists
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -203,6 +468,7 @@ def extract_clip_and_pose(video_path, start_frame, duration, inferencer, K=None,
     # Seek to start frame
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     img_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    img_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     
     frames = []
     poses_per_frame = []
@@ -228,11 +494,11 @@ def extract_clip_and_pose(video_path, start_frame, duration, inferencer, K=None,
             for instance in predictions:
                 if return_all_poses:
                     # Store all poses with validity flag
-                    is_valid = is_pose_valid(instance, K, D, H, img_height=img_height)
+                    is_valid = is_pose_valid(instance, K, D, H, img_height=img_height, img_width=img_width)
                     frame_all_poses.append((instance, is_valid))
                 
-                # Filter here
-                if is_pose_valid(instance, K, D, H, img_height=img_height):
+                # Filter here (corner/bottom filtering included)
+                if is_pose_valid(instance, K, D, H, img_height=img_height, img_width=img_width):
                     frame_poses.append(instance)
                 
         poses_per_frame.append(frame_poses)
@@ -240,8 +506,90 @@ def extract_clip_and_pose(video_path, start_frame, duration, inferencer, K=None,
             all_poses_per_frame.append(frame_all_poses)
 
     cap.release()
+    
+    # Debug: count poses before filtering
+    total_poses_before = sum(len(p) for p in poses_per_frame)
+    
+    # Save original poses before filtering for visualization
+    original_poses_per_frame = [p.copy() for p in poses_per_frame]
+    
+    # Apply stationary pose filtering (removes poses that are near bottom AND barely move)
+    poses_per_frame_after_stationary = filter_stationary_poses(poses_per_frame, movement_threshold=20.0, min_frames=5,
+                                             img_height=img_height, bottom_margin=0.05, 
+                                             filter_bottom_stationary_only=True)
+    
+    # Debug: count poses after stationary filtering
+    total_poses_after_stationary = sum(len(p) for p in poses_per_frame_after_stationary)
+    
+    # Apply flickering pose filtering (removes poses that appear in < 80% of frames)
+    poses_per_frame_after_flickering, flickering_tracks = filter_flickering_poses(poses_per_frame_after_stationary, min_presence_ratio=0.8)
+    
+    # Debug: count poses after flickering filtering
+    total_poses_after_flickering = sum(len(p) for p in poses_per_frame_after_flickering)
+    
+    # Debug output to verify filtering is working
+    if DEBUG_MODE and (total_poses_before > total_poses_after_flickering):
+        print(f"  Filtering applied: {total_poses_before} -> {total_poses_after_stationary} (after stationary) -> {total_poses_after_flickering} (after flickering)")
+        print(f"    Removed {total_poses_before - total_poses_after_stationary} poses (stationary+bottom)")
+        print(f"    Removed {total_poses_after_stationary - total_poses_after_flickering} poses (flickering)")
+    
+    # Build filtering info for visualization: track which poses were filtered
+    filtering_info = {
+        'filtered_per_frame': [set() for _ in range(len(original_poses_per_frame))],
+        'flickering_per_frame': [set() for _ in range(len(original_poses_per_frame))]
+    }
+    
+    # Map filtered poses back to original indices by matching bboxes
+    for frame_idx in range(len(original_poses_per_frame)):
+        original_poses = original_poses_per_frame[frame_idx]
+        after_stationary = poses_per_frame_after_stationary[frame_idx] if frame_idx < len(poses_per_frame_after_stationary) else []
+        after_flickering = poses_per_frame_after_flickering[frame_idx] if frame_idx < len(poses_per_frame_after_flickering) else []
+        
+        # Find poses filtered by stationary
+        for orig_idx, orig_pose in enumerate(original_poses):
+            orig_bbox = unwrap_bbox(orig_pose['bbox'])
+            if len(orig_bbox) < 4:
+                continue
+            orig_center = ((orig_bbox[0] + orig_bbox[2]) / 2, (orig_bbox[1] + orig_bbox[3]) / 2)
+            
+            found_in_stationary = False
+            for filtered_pose in after_stationary:
+                filtered_bbox = unwrap_bbox(filtered_pose['bbox'])
+                if len(filtered_bbox) < 4:
+                    continue
+                filtered_center = ((filtered_bbox[0] + filtered_bbox[2]) / 2, 
+                                  (filtered_bbox[1] + filtered_bbox[3]) / 2)
+                dist = np.sqrt((orig_center[0] - filtered_center[0])**2 + 
+                              (orig_center[1] - filtered_center[1])**2)
+                if dist < 50:
+                    found_in_stationary = True
+                    break
+            
+            if not found_in_stationary:
+                filtering_info['filtered_per_frame'][frame_idx].add(orig_idx)
+            else:
+                # Check if it's in flickering (was in stationary but not in flickering)
+                found_in_flickering = False
+                for flickering_pose in after_flickering:
+                    flickering_bbox = unwrap_bbox(flickering_pose['bbox'])
+                    if len(flickering_bbox) < 4:
+                        continue
+                    flickering_center = ((flickering_bbox[0] + flickering_bbox[2]) / 2, 
+                                        (flickering_bbox[1] + flickering_bbox[3]) / 2)
+                    dist = np.sqrt((orig_center[0] - flickering_center[0])**2 + 
+                                  (orig_center[1] - flickering_center[1])**2)
+                    if dist < 50:
+                        found_in_flickering = True
+                        break
+                
+                if not found_in_flickering:
+                    filtering_info['flickering_per_frame'][frame_idx].add(orig_idx)
+    
+    # Use filtered poses for actual processing
+    poses_per_frame = poses_per_frame_after_flickering
+    
     if return_all_poses:
-        return frames, poses_per_frame, all_poses_per_frame
+        return frames, poses_per_frame, all_poses_per_frame, filtering_info
     return frames, poses_per_frame
 
 def unwrap_bbox(bbox):
@@ -253,7 +601,7 @@ def unwrap_bbox(bbox):
     return bbox
 
 def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info=None, 
-                is_forward_filled=False, forward_filled_pose=None):
+                is_forward_filled=False, forward_filled_pose=None, filtering_info=None):
     """
     Draws bounding boxes and labels on the frame.
     
@@ -262,6 +610,7 @@ def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info
         all_poses_info: List of (pose, is_valid) tuples for all detected poses (including filtered ones)
         is_forward_filled: If True, active player is forward-filled (show in blue)
         forward_filled_pose: The pose to draw when forward-filling (if None, uses last pose in poses)
+        filtering_info: Dict with 'filtered_per_frame' and 'flickering_per_frame' sets of pose indices
     """
     img = frame.copy()
     
@@ -292,6 +641,20 @@ def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info
             # - Yellow: Valid but not tracked
             # - Magenta: Invalid (filtered out)
             
+            # Check filtering status
+            is_filtered = False
+            is_flickering = False
+            if filtering_info is not None:
+                # Note: i is the index in all_poses_info, which should match the original pose index
+                # We need to get the frame index - but we don't have it here. 
+                # For now, we'll check if this pose matches any filtered pose by bbox
+                # This is approximate but should work
+                this_bbox = unwrap_bbox(pose['bbox'])
+                if len(this_bbox) >= 4:
+                    # Try to match with filtered/flickering poses by checking all frames
+                    # This is a simplified approach - ideally we'd pass frame_idx
+                    pass  # Will handle below with bbox matching
+            
             if is_valid:
                 valid_count += 1
                 # Check if this pose is in the filtered list and tracked
@@ -314,7 +677,22 @@ def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info
                                 tracked_as = 'idle'
                             break
                 
-                if tracked_as == 'active':
+                # Check if this pose was filtered (stationary/bottom) or flickering
+                if filtering_info is not None:
+                    # filtering_info is now per-frame: {'filtered': set(), 'flickering': set()}
+                    if i in filtering_info.get('flickering', set()):
+                        is_flickering = True
+                    elif i in filtering_info.get('filtered', set()):
+                        is_filtered = True
+                
+                # Determine color based on status
+                if is_flickering:
+                    color = (0, 0, 0)  # Black - flickering
+                    label = f"P{i} FLICKERING"
+                elif is_filtered:
+                    color = (0, 165, 255)  # Orange - filtered (stationary/bottom)
+                    label = f"P{i} FILTERED"
+                elif tracked_as == 'active':
                     if is_forward_filled:
                         color = (255, 0, 0)  # Blue - forward-filled
                         label = f"P{i} ACTIVE (FILLED)"
@@ -331,8 +709,8 @@ def draw_overlay(frame, poses, active_idx, idle_idx, debug=False, all_poses_info
                     color = (0, 255, 255)  # Yellow - should not happen
                     label = f"P{i} VALID?"
             else:
-                color = (255, 0, 255)  # Magenta - filtered out
-                label = f"P{i} FILTERED"
+                color = (255, 0, 255)  # Magenta - invalid (initial validation failed)
+                label = f"P{i} INVALID"
             
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
@@ -533,14 +911,16 @@ def main():
             
             # Extract data with filtering
             if DEBUG_MODE:
-                frames, poses_per_frame, all_poses_per_frame = extract_clip_and_pose(
+                result = extract_clip_and_pose(
                     video_path, start_frame, duration, inferencer, K, D, H, return_all_poses=True
                 )
+                frames, poses_per_frame, all_poses_per_frame, filtering_info = result
             else:
                 frames, poses_per_frame = extract_clip_and_pose(
                     video_path, start_frame, duration, inferencer, K, D, H, return_all_poses=False
                 )
                 all_poses_per_frame = None
+                filtering_info = None
             
             if not frames or not poses_per_frame:
                 tqdm.write(f"    Failed to extract frames for shot {shot_type} at {center_frame}")
@@ -737,9 +1117,16 @@ def main():
                 
                 # Overlay - pass all poses info if available
                 all_poses_info = all_poses_per_frame[i] if (all_poses_per_frame and i < len(all_poses_per_frame)) else None
+                # Get filtering info for this frame
+                frame_filtering_info = None
+                if filtering_info is not None and i < len(filtering_info.get('filtered_per_frame', [])):
+                    frame_filtering_info = {
+                        'filtered': filtering_info['filtered_per_frame'][i] if i < len(filtering_info['filtered_per_frame']) else set(),
+                        'flickering': filtering_info['flickering_per_frame'][i] if i < len(filtering_info['flickering_per_frame']) else set()
+                    }
                 vis_frame = draw_overlay(frame, poses, act_idx, idl_idx, debug=DEBUG_MODE, 
                                         all_poses_info=all_poses_info, is_forward_filled=is_forward_filled,
-                                        forward_filled_pose=forward_filled_pose)
+                                        forward_filled_pose=forward_filled_pose, filtering_info=frame_filtering_info)
                 if out is not None:
                     out.write(vis_frame)
                 
