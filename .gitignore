@@ -1,0 +1,6 @@
+*.csv
+*.mp4
+*__pycache__*
+_venv_
+_env_
+*.lock
