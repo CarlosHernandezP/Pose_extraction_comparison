@@ -10,18 +10,20 @@ import glob
 import pandas as pd
 
 
-# Default mapping for 4-class system: forehand, backhand, serve, idle
+# Default mapping for extended system: individual types for vibora, smash, and bandeja, plus others
 DEFAULT_SHOT_MAPPING = {
     'forehand': [
         'forehand',
         'forehand_volley',
         'forehand_wall_exit',
         'forehand_contrapared',
-        'flat_smash',
+        'bajada',
+         'bandeja',
+         'flat_smash',
         'topspin_smash',
-        'vibora',
-        'bandeja',
-        'bajada'
+        'smash',
+        'vibora'
+
     ],
     'backhand': [
         'backhand',

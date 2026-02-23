@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import LabelEncoder
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, StratifiedKFold, train_test_split
 from sklearn.metrics import (
     confusion_matrix, classification_report, balanced_accuracy_score,
     precision_score, recall_score, f1_score, accuracy_score
@@ -142,10 +142,13 @@ def validate_sequence(sequence: np.ndarray) -> bool:
 
 
 def load_training_data(data_dir: str, shot_mapping: Optional[Dict] = None, 
-                      use_augmentation: bool = True, 
+                      use_augmentation: bool = False, 
                       augmentation_config: Optional[Dict] = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load all pose sequences and labels from data directory.
+    
+    NOTE: Augmentation should be applied AFTER train/test split, only to training data.
+    This function loads raw data without augmentation.
     
     Parameters
     ----------
@@ -154,9 +157,11 @@ def load_training_data(data_dir: str, shot_mapping: Optional[Dict] = None,
     shot_mapping : dict, optional
         Shot type mapping dictionary. If None, uses DEFAULT_SHOT_MAPPING.
     use_augmentation : bool
-        Whether to apply data augmentation (default: True)
+        DEPRECATED: Augmentation should be applied after train/test split.
+        This parameter is kept for backward compatibility but ignored.
     augmentation_config : dict, optional
-        Augmentation configuration (see data_augmentation.py)
+        DEPRECATED: Augmentation should be applied after train/test split.
+        This parameter is kept for backward compatibility but ignored.
         
     Returns
     -------
@@ -246,15 +251,8 @@ def load_training_data(data_dir: str, shot_mapping: Optional[Dict] = None,
     for cls, cnt in zip(unique, counts):
         print(f"  {cls}: {cnt}")
     
-    # Apply data augmentation if requested
-    if use_augmentation:
-        print("\nApplying data augmentation...")
-        sequences, labels = augment_dataset(sequences, labels, augmentation_config)
-        print(f"After augmentation: {len(sequences)} sequences")
-        print(f"Class distribution:")
-        unique, counts = np.unique(labels, return_counts=True)
-        for cls, cnt in zip(unique, counts):
-            print(f"  {cls}: {cnt}")
+    # NOTE: Data augmentation should be applied AFTER train/test split, only to training data
+    # This is handled in train_random_forest() function
     
     return sequences, labels
 
@@ -268,7 +266,9 @@ def train_random_forest(
     n_estimators: int = 100,
     max_depth: Optional[int] = None,
     random_state: int = 42,
-    cv_folds: int = 5
+    cv_folds: int = 5,
+    class_weight: Optional[str] = 'balanced',
+    test_size: float = 0.2
 ) -> Tuple[RandomForestClassifier, LabelEncoder]:
     """
     Train Random Forest classifier for shot detection.
@@ -293,102 +293,205 @@ def train_random_forest(
         Random seed for reproducibility
     cv_folds : int
         Number of cross-validation folds (default: 5)
+    class_weight : str or None, optional
+        Class weight strategy. Options:
+        - 'balanced': Automatically adjust weights inversely proportional to class frequencies
+        - 'balanced_subsample': Same as 'balanced' but computed for each bootstrap sample
+        - None: No class weighting (default: 'balanced')
+    test_size : float
+        Proportion of dataset to include in the test split (default: 0.2 = 20%)
         
     Returns
     -------
     tuple
         (trained_model, label_encoder)
     """
-    # Load training data
+    # Load raw data (no augmentation yet)
     sequences, labels = load_training_data(
         data_dir, 
         shot_mapping=shot_mapping,
-        use_augmentation=use_augmentation,
-        augmentation_config=augmentation_config
+        use_augmentation=False,  # Augmentation applied after split
+        augmentation_config=None
     )
     
-    # Extract temporal features
-    print("\nExtracting temporal features...")
-    X = extract_temporal_features(sequences)
-    print(f"Feature shape: {X.shape}")
-    
-    # Encode labels
+    # Encode labels first (needed for stratified split)
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(labels)
+    y_encoded = label_encoder.fit_transform(labels)
     
     print(f"\nClasses: {label_encoder.classes_}")
-    print(f"Number of features: {X.shape[1]}")
     
-    # Train Random Forest
-    print("\nTraining Random Forest...")
+    # Split into train/test BEFORE augmentation (split on sequences, not features)
+    # Using stratified split to maintain class distribution in both sets
+    print(f"\nSplitting data into train/test ({1-test_size:.0%}/{test_size:.0%}) with stratified sampling...")
+    train_indices, test_indices = train_test_split(
+        np.arange(len(sequences)),
+        test_size=test_size,
+        random_state=random_state,
+        stratify=y_encoded  # Stratify on labels to maintain class distribution
+    )
+    
+    train_sequences = sequences[train_indices]
+    train_labels = labels[train_indices]
+    test_sequences = sequences[test_indices]
+    test_labels = labels[test_indices]
+    
+    print(f"Training set: {len(train_sequences)} sequences")
+    print(f"Test set: {len(test_sequences)} sequences")
+    print("✓ Stratified split ensures proportional class distribution in both sets")
+    
+    # Apply data augmentation ONLY to training data
+    if use_augmentation:
+        print("\nApplying data augmentation to TRAINING data only...")
+        # Apply augmentation to training sequences
+        train_sequences_aug, train_labels_aug = augment_dataset(
+            train_sequences, train_labels, augmentation_config
+        )
+        
+        # Extract features from augmented training sequences
+        X_train = extract_temporal_features(train_sequences_aug)
+        y_train = label_encoder.transform(train_labels_aug)
+        
+        print(f"After augmentation: {len(X_train)} training samples")
+    else:
+        # Extract features from original training sequences (no augmentation)
+        X_train = extract_temporal_features(train_sequences)
+        y_train = label_encoder.transform(train_labels)
+        print("\nNo data augmentation applied")
+    
+    # Extract features from test sequences (NO augmentation)
+    X_test = extract_temporal_features(test_sequences)
+    y_test = label_encoder.transform(test_labels)
+    
+    # Show class distribution
+    print(f"\nTraining set class distribution:")
+    unique_train, counts_train = np.unique(y_train, return_counts=True)
+    for cls_idx, cls_name in enumerate(label_encoder.classes_):
+        count = counts_train[unique_train == cls_idx][0] if len(counts_train[unique_train == cls_idx]) > 0 else 0
+        print(f"  {cls_name}: {count} samples")
+    
+    print(f"\nTest set class distribution:")
+    unique_test, counts_test = np.unique(y_test, return_counts=True)
+    for cls_idx, cls_name in enumerate(label_encoder.classes_):
+        count = counts_test[unique_test == cls_idx][0] if len(counts_test[unique_test == cls_idx]) > 0 else 0
+        print(f"  {cls_name}: {count} samples")
+    
+    # Train Random Forest on training data
+    print("\nTraining Random Forest on training set...")
+    
+    # Calculate class weights if needed
+    if class_weight == 'balanced':
+        print(f"Using balanced class weights to handle imbalanced dataset")
+    elif class_weight == 'balanced_subsample':
+        print(f"Using balanced_subsample class weights (per bootstrap sample)")
+    elif class_weight is None:
+        print(f"No class weighting (may bias toward majority classes)")
+    
     rf_model = RandomForestClassifier(
         n_estimators=n_estimators,
         max_depth=max_depth,
         random_state=random_state,
+        class_weight=class_weight,
         n_jobs=-1,
         verbose=1
     )
     
-    rf_model.fit(X, y)
+    rf_model.fit(X_train, y_train)
     
-    # Cross-validation evaluation
-    print("\nPerforming cross-validation...")
+    # Cross-validation on TRAINING data only (for model selection/hyperparameter tuning)
+    print("\nPerforming cross-validation on TRAINING data...")
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    cv_scores = cross_val_score(rf_model, X, y, cv=cv, scoring='accuracy')
-    cv_balanced_scores = cross_val_score(rf_model, X, y, cv=cv, scoring='balanced_accuracy')
+    cv_scores = cross_val_score(rf_model, X_train, y_train, cv=cv, scoring='accuracy')
+    cv_balanced_scores = cross_val_score(rf_model, X_train, y_train, cv=cv, scoring='balanced_accuracy')
     
-    print(f"\nCross-validation results ({cv_folds}-fold):")
+    print(f"\nCross-validation results on training data ({cv_folds}-fold):")
     print(f"  Mean accuracy: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
     print(f"  Mean balanced accuracy: {cv_balanced_scores.mean():.4f} (+/- {cv_balanced_scores.std() * 2:.4f})")
     print(f"  Per-fold accuracy: {cv_scores}")
     print(f"  Per-fold balanced accuracy: {cv_balanced_scores}")
     
-    # Full dataset predictions for evaluation
-    y_pred = rf_model.predict(X)
-    y_pred_proba = rf_model.predict_proba(X)
+    # Evaluate on TEST set (unseen data)
+    print("\n" + "="*80)
+    print("EVALUATING ON TEST SET (unseen data)")
+    print("="*80)
+    y_test_pred = rf_model.predict(X_test)
+    y_test_pred_proba = rf_model.predict_proba(X_test)
     
-    # Calculate comprehensive metrics
-    accuracy = accuracy_score(y, y_pred)
-    balanced_acc = balanced_accuracy_score(y, y_pred)
+    # Also evaluate on training set for comparison
+    y_train_pred = rf_model.predict(X_train)
+    y_train_pred_proba = rf_model.predict_proba(X_train)
     
-    # Per-class metrics
-    precision_per_class = precision_score(y, y_pred, average=None, zero_division=0)
-    recall_per_class = recall_score(y, y_pred, average=None, zero_division=0)
-    f1_per_class = f1_score(y, y_pred, average=None, zero_division=0)
+    # Calculate comprehensive metrics on TEST set
+    test_accuracy = accuracy_score(y_test, y_test_pred)
+    test_balanced_acc = balanced_accuracy_score(y_test, y_test_pred)
     
-    # Macro and micro averages
-    precision_macro = precision_score(y, y_pred, average='macro', zero_division=0)
-    recall_macro = recall_score(y, y_pred, average='macro', zero_division=0)
-    f1_macro = f1_score(y, y_pred, average='macro', zero_division=0)
+    # Per-class metrics on TEST set
+    test_precision_per_class = precision_score(y_test, y_test_pred, average=None, zero_division=0)
+    test_recall_per_class = recall_score(y_test, y_test_pred, average=None, zero_division=0)
+    test_f1_per_class = f1_score(y_test, y_test_pred, average=None, zero_division=0)
     
-    precision_micro = precision_score(y, y_pred, average='micro', zero_division=0)
-    recall_micro = recall_score(y, y_pred, average='micro', zero_division=0)
-    f1_micro = f1_score(y, y_pred, average='micro', zero_division=0)
+    # Macro and micro averages on TEST set
+    test_precision_macro = precision_score(y_test, y_test_pred, average='macro', zero_division=0)
+    test_recall_macro = recall_score(y_test, y_test_pred, average='macro', zero_division=0)
+    test_f1_macro = f1_score(y_test, y_test_pred, average='macro', zero_division=0)
     
-    # Confusion matrix
-    cm = confusion_matrix(y, y_pred, labels=range(len(label_encoder.classes_)))
+    test_precision_micro = precision_score(y_test, y_test_pred, average='micro', zero_division=0)
+    test_recall_micro = recall_score(y_test, y_test_pred, average='micro', zero_division=0)
+    test_f1_micro = f1_score(y_test, y_test_pred, average='micro', zero_division=0)
+    
+    # Confusion matrix on TEST set
+    cm_test = confusion_matrix(y_test, y_test_pred, labels=range(len(label_encoder.classes_)))
+    
+    # Also calculate metrics on TRAINING set for comparison
+    train_accuracy = accuracy_score(y_train, y_train_pred)
+    train_balanced_acc = balanced_accuracy_score(y_train, y_train_pred)
+    train_precision_macro = precision_score(y_train, y_train_pred, average='macro', zero_division=0)
+    train_recall_macro = recall_score(y_train, y_train_pred, average='macro', zero_division=0)
+    train_f1_macro = f1_score(y_train, y_train_pred, average='macro', zero_division=0)
+    
+    # Use TEST metrics as primary metrics
+    accuracy = test_accuracy
+    balanced_acc = test_balanced_acc
+    precision_per_class = test_precision_per_class
+    recall_per_class = test_recall_per_class
+    f1_per_class = test_f1_per_class
+    precision_macro = test_precision_macro
+    recall_macro = test_recall_macro
+    f1_macro = test_f1_macro
+    precision_micro = test_precision_micro
+    recall_micro = test_recall_micro
+    f1_micro = test_f1_micro
+    cm = cm_test
+    y_pred = y_test_pred
+    y_pred_proba = y_test_pred_proba
     
     # Print to console
     print("\n" + "="*80)
-    print("TRAINING RESULTS")
+    print("TEST SET RESULTS (unseen data)")
     print("="*80)
     
-    print(f"\nOverall Metrics:")
-    print(f"  Accuracy: {accuracy:.4f}")
-    print(f"  Balanced Accuracy: {balanced_acc:.4f}")
-    print(f"  Precision (macro): {precision_macro:.4f}")
-    print(f"  Recall (macro): {recall_macro:.4f}")
-    print(f"  F1-score (macro): {f1_macro:.4f}")
+    print(f"\nOverall Metrics (TEST SET):")
+    print(f"  Accuracy: {test_accuracy:.4f}")
+    print(f"  Balanced Accuracy: {test_balanced_acc:.4f}")
+    print(f"  Precision (macro): {test_precision_macro:.4f}")
+    print(f"  Recall (macro): {test_recall_macro:.4f}")
+    print(f"  F1-score (macro): {test_f1_macro:.4f}")
     
-    print(f"\nPer-Class Metrics:")
+    print(f"\nTraining Set Metrics (for comparison):")
+    print(f"  Accuracy: {train_accuracy:.4f}")
+    print(f"  Balanced Accuracy: {train_balanced_acc:.4f}")
+    print(f"  Precision (macro): {train_precision_macro:.4f}")
+    print(f"  Recall (macro): {train_recall_macro:.4f}")
+    print(f"  F1-score (macro): {train_f1_macro:.4f}")
+    
+    print(f"\nPer-Class Metrics (TEST SET):")
     print(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
     print("-" * 65)
     for i, cls in enumerate(label_encoder.classes_):
-        support = np.sum(y == i)
+        support = np.sum(y_test == i)  # Use y_test for test set support
         print(f"{cls:<15} {precision_per_class[i]:<12.4f} {recall_per_class[i]:<12.4f} "
               f"{f1_per_class[i]:<12.4f} {support:<10}")
     
-    print("\nConfusion Matrix:")
+    print("\nConfusion Matrix (TEST SET):")
     print(" " * 15, end="")
     for cls in label_encoder.classes_:
         print(f"{cls:>12}", end="")
@@ -399,9 +502,9 @@ def train_random_forest(
             print(f"{cm[i, j]:>12}", end="")
         print()
     
-    # Classification report
-    print("\nDetailed Classification Report:")
-    print(classification_report(y, y_pred, target_names=label_encoder.classes_))
+    # Classification report (on TEST set)
+    print("\nDetailed Classification Report (TEST SET):")
+    print(classification_report(y_test, y_test_pred, target_names=label_encoder.classes_))
     
     # Feature importance
     feature_importance = rf_model.feature_importances_
@@ -412,11 +515,11 @@ def train_random_forest(
         feat_name = feature_names[idx] if idx < len(feature_names) else f'feature_{idx}'
         print(f"  Feature {idx} ({feat_name}): {feature_importance[idx]:.6f}")
     
-    # Misclassification analysis
+    # Misclassification analysis (on TEST set)
     print("\n" + "="*80)
-    print("MISCLASSIFICATION ANALYSIS")
+    print("MISCLASSIFICATION ANALYSIS (TEST SET)")
     print("="*80)
-    misclassifications = analyze_misclassifications(y, y_pred, y_pred_proba, label_encoder.classes_)
+    misclassifications = analyze_misclassifications(y_test, y_test_pred, y_test_pred_proba, label_encoder.classes_)
     print_misclassification_summary(misclassifications, label_encoder.classes_)
     
     # Save model and label encoder
@@ -444,7 +547,7 @@ def train_random_forest(
         precision_micro, recall_micro, f1_micro,
         cm, label_encoder.classes_, cv_scores, cv_balanced_scores,
         feature_importance, misclassifications,
-        len(sequences), use_augmentation
+        len(X_train), len(X_test), use_augmentation
     )
     
     print(f"\nTraining report saved to {results_dir}/")
@@ -685,7 +788,7 @@ def save_training_report(results_dir: Path, timestamp: str, accuracy: float, bal
                         f1_micro: float, cm: np.ndarray, class_names: np.ndarray,
                         cv_scores: np.ndarray, cv_balanced_scores: np.ndarray,
                         feature_importance: np.ndarray, misclassifications: Dict, 
-                        num_samples: int, use_augmentation: bool):
+                        num_train_samples: int, num_test_samples: int, use_augmentation: bool):
     """
     Save comprehensive training report to files.
     
@@ -701,7 +804,9 @@ def save_training_report(results_dir: Path, timestamp: str, accuracy: float, bal
     report = {
         'timestamp': timestamp,
         'model_info': {
-            'num_samples': int(num_samples),
+            'num_train_samples': int(num_train_samples),
+            'num_test_samples': int(num_test_samples),
+            'total_samples': int(num_train_samples + num_test_samples),
             'use_augmentation': use_augmentation,
             'num_classes': len(class_names),
             'classes': class_names.tolist()
@@ -770,10 +875,13 @@ def save_training_report(results_dir: Path, timestamp: str, accuracy: float, bal
         f.write("SHOT DETECTION MODEL TRAINING REPORT\n")
         f.write("="*80 + "\n\n")
         f.write(f"Timestamp: {timestamp}\n")
-        f.write(f"Number of samples: {num_samples}\n")
-        f.write(f"Data augmentation: {use_augmentation}\n")
+        f.write(f"Training samples: {num_train_samples}\n")
+        f.write(f"Test samples: {num_test_samples}\n")
+        f.write(f"Total samples: {num_train_samples + num_test_samples}\n")
+        f.write(f"Data augmentation: {use_augmentation} (applied to training data only)\n")
         f.write(f"Number of classes: {len(class_names)}\n")
         f.write(f"Classes: {', '.join(class_names)}\n\n")
+        f.write("NOTE: All metrics below are computed on TEST SET (unseen data)\n\n")
         
         f.write("="*80 + "\n")
         f.write("OVERALL METRICS\n")
@@ -968,8 +1076,24 @@ def main():
         default=5,
         help='Number of cross-validation folds (default: 5)'
     )
+    parser.add_argument(
+        '--class-weight',
+        type=str,
+        default='balanced',
+        choices=['balanced', 'balanced_subsample', 'none'],
+        help='Class weight strategy: "balanced" (default), "balanced_subsample", or "none"'
+    )
+    parser.add_argument(
+        '--test-size',
+        type=float,
+        default=0.2,
+        help='Proportion of dataset to use for testing (default: 0.2 = 20%%)'
+    )
     
     args = parser.parse_args()
+    
+    # Convert 'none' to None for class_weight parameter
+    class_weight = None if args.class_weight == 'none' else args.class_weight
     
     if args.discover_shots:
         discover_shot_types(args.data_dir)
@@ -991,7 +1115,9 @@ def main():
         augmentation_config=augmentation_config if not args.no_augmentation else None,
         n_estimators=args.n_estimators,
         max_depth=args.max_depth,
-        cv_folds=args.cv_folds
+        cv_folds=args.cv_folds,
+        class_weight=class_weight,
+        test_size=args.test_size
     )
 
 
